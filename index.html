@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mi TV</title>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#1b2236;--tile:#2a3556;--ink:#fff6e6;--ring:#ffc247}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:'Atkinson Hyperlegible',system-ui,sans-serif}
+main{padding:5vh 5vw}
+h1{font-size:clamp(40px,5vw,72px);margin:0 0 8px}
+p.hint{font-size:clamp(22px,2.2vw,32px);margin:0 0 5vh;opacity:.85}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:32px}
+.tile{aspect-ratio:16/10;border:0;border-radius:24px;background:var(--tile);color:var(--ink);font:inherit;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;cursor:pointer;
+  font-size:clamp(28px,3vw,46px);font-weight:700;transition:transform .15s}
+.tile .ico{font-size:1.8em;line-height:1}
+.tile:focus{outline:8px solid var(--ring);outline-offset:4px;transform:scale(1.06)}
+#player{position:fixed;inset:0;background:#000;display:none}
+#player.on{display:block}
+video{width:100%;height:100%;background:#000}
+#name{position:absolute;left:5vw;top:5vh;font-size:clamp(32px,4vw,56px);font-weight:700;
+  background:rgba(0,0,0,.65);padding:12px 28px;border-radius:16px;transition:opacity .4s}
+#name.off{opacity:0}
+#err{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;
+  gap:32px;background:rgba(27,34,54,.96);text-align:center;font-size:clamp(32px,4vw,56px);padding:5vw}
+#err.on{display:flex}
+#err div{display:flex;gap:28px}
+#err button{font:inherit;font-size:.8em;font-weight:700;padding:20px 48px;border:0;border-radius:20px;background:var(--tile);color:var(--ink)}
+#err button:focus{outline:8px solid var(--ring);outline-offset:4px}
+@media (prefers-reduced-motion:reduce){.tile,#name{transition:none}}
+</style>
+</head>
+<body>
+<main id="menu">
+  <h1>Mi TV</h1>
+  <p class="hint">Elige un canal con las flechas y pulsa OK.</p>
+  <div id="grid"></div>
+</main>
+
+<div id="player">
+  <video id="v" autoplay playsinline></video>
+  <div id="name"></div>
+  <div id="err">
+    <span>No se pudo cargar este canal.</span>
+    <div><button id="retry">Reintentar</button><button id="back">Volver</button></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
+<script>
+// ---- EDIT THIS LIST: one line per channel (name, emoji, HLS .m3u8 link) ----
+// These two are examples and may need replacing if the link stops working.
+const CHANNELS = [
+  {name:"NASA TV",     emoji:"🚀", url:"https://ntv1.akamaized.net/hls/live/2014075/NASA-NTV1-HLS/master.m3u8"},
+  {name:"DW Español",  emoji:"📰", url:"https://dwamdstream104.akamaized.net/hls/live/2015530/dwstream104/index.m3u8"},
+  // {name:"Mi canal",  emoji:"🎬", url:"https://example.com/stream.m3u8"},
+];
+// -----------------------------------------------------------------------------
+
+// If a file named channels.m3u sits next to this page, it replaces the list above.
+const PLAYLIST = 'channels.m3u';
+
+let list = CHANNELS.filter(c => c.url);
+const $ = id => document.getElementById(id);
+const grid = $('grid'), v = $('v'), player = $('player'), err = $('err'), nameEl = $('name');
+let cur = 0, hls = null, hideT = null, tiles = [];
+
+function icon(n) {
+  if (/pel[ií]cula|cine|movie|film/i.test(n)) return '🎬';
+  if (/noticia|news|24h/i.test(n)) return '📰';
+  if (/m[uú]sica|music/i.test(n)) return '🎵';
+  return '📺';
+}
+function parseM3U(text) {
+  const out = []; let name = null;
+  for (const raw of text.split(/\r?\n/)) {
+    const l = raw.trim();
+    if (l.startsWith('#EXTINF')) name = l.slice(l.lastIndexOf(',') + 1).trim();
+    else if (l && !l.startsWith('#')) { out.push({name: name || l, emoji: icon(name || ''), url: l}); name = null; }
+  }
+  return out;
+}
+function build() {
+  if (!list.length) {
+    grid.textContent = 'Todavía no hay canales. Agrega enlaces en channels.m3u.';
+    return;
+  }
+  list.forEach((c, i) => {
+    const b = document.createElement('button');
+    b.className = 'tile';
+    b.innerHTML = '<span class="ico">' + c.emoji + '</span><span></span>';
+    b.lastChild.textContent = c.name;
+    b.onclick = () => play(i);
+    grid.appendChild(b);
+  });
+  tiles = [...grid.children];
+  tiles[0].focus();
+}
+fetch(PLAYLIST)
+  .then(r => r.ok ? r.text() : Promise.reject())
+  .then(t => { const p = parseM3U(t); if (p.length) list = p; })
+  .catch(() => {})
+  .then(build);
+
+function stop() {
+  if (hls) { hls.destroy(); hls = null; }
+  v.pause(); v.removeAttribute('src'); v.load();
+}
+function fail() { err.classList.add('on'); $('retry').focus(); }
+function showName() {
+  nameEl.textContent = list[cur].name;
+  nameEl.classList.remove('off');
+  clearTimeout(hideT);
+  hideT = setTimeout(() => nameEl.classList.add('off'), 4000);
+}
+function load() {
+  stop(); err.classList.remove('on');
+  const url = list[cur].url;
+  if (window.Hls && Hls.isSupported()) {
+    hls = new Hls();
+    hls.loadSource(url); hls.attachMedia(v);
+    hls.on(Hls.Events.ERROR, (e, d) => { if (d.fatal) fail(); });
+  } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
+    v.src = url;
+  } else { fail(); return; }
+  v.play().catch(() => {});
+  showName();
+}
+function play(i) {
+  cur = (i + list.length) % list.length;
+  player.classList.add('on');
+  load();
+}
+function exit() {
+  stop(); err.classList.remove('on');
+  player.classList.remove('on');
+  tiles[cur] && tiles[cur].focus();
+}
+v.onerror = fail;
+$('retry').onclick = load;
+$('back').onclick = exit;
+
+document.addEventListener('keydown', e => {
+  const isBack = e.key === 'Escape' || e.key === 'Backspace' || e.key === 'GoBack' || e.keyCode === 4;
+  if (player.classList.contains('on')) {
+    if (isBack) { e.preventDefault(); exit(); return; }
+    if (err.classList.contains('on')) {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        ($('retry') === document.activeElement ? $('back') : $('retry')).focus();
+      }
+      return;
+    }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); play(cur - 1); }
+    if (e.key === 'ArrowDown') { e.preventDefault(); play(cur + 1); }
+    if (e.key === 'Enter' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') showName();
+    return;
+  }
+  const i = tiles.indexOf(document.activeElement);
+  const cols = getComputedStyle(grid).gridTemplateColumns.split(' ').length;
+  let n = null;
+  if (e.key === 'ArrowRight') n = i + 1;
+  if (e.key === 'ArrowLeft')  n = i - 1;
+  if (e.key === 'ArrowDown')  n = Math.min(i + cols, tiles.length - 1);
+  if (e.key === 'ArrowUp')    n = i - cols;
+  if (n !== null) {
+    e.preventDefault();
+    if (n >= 0 && n < tiles.length) tiles[n].focus();
+  }
+});
+</script>
+</body>
+</html>
